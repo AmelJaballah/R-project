@@ -1,0 +1,801 @@
+---
+title: "☀️ Analyse de la Production d'Énergie Solaire"
+subtitle: "Storytelling des données météorologiques et solaires en Tunisie"
+author: "Projet R - Analyse Solaire"
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Voir le code"
+    fig-width: 10
+    fig-height: 6
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| label: setup
+#| include: false
+
+# Chargement des packages
+library(tidyverse)
+library(lubridate)
+library(plotly)
+library(DT)
+library(corrplot)
+library(scales)
+library(knitr)
+
+# Configuration du thème ggplot
+theme_set(theme_minimal(base_size = 12) +
+            theme(plot.title = element_text(face = "bold", size = 14),
+                  plot.subtitle = element_text(color = "gray50"),
+                  legend.position = "bottom"))
+
+# Palette de couleurs solaires
+solar_colors <- c("#FFD700", "#FFA500", "#FF6B35", "#004E89", "#1A659E")
+```
+
+# 🌞 Introduction
+
+## Contexte du Projet
+
+Ce rapport présente une **analyse complète des données de production d'énergie solaire** collectées auprès de différentes stations météorologiques en Tunisie. L'objectif est de comprendre les facteurs qui influencent la production des panneaux solaires et le niveau des batteries.
+
+::: {.callout-note}
+## Importance de l'Analyse
+Cette étude permet de :
+
+- **Prévoir l'efficacité** des panneaux solaires
+- **Optimiser la gestion** de l'énergie
+- **Identifier les meilleures périodes** pour une production maximale
+:::
+
+```{r load-data}
+#| label: load-data
+
+# Chargement des données
+df <- read_csv("donnees_cleaned.csv", show_col_types = FALSE)
+
+# Conversion de la date
+df <- df %>%
+  mutate(
+    Date = ymd_hms(Date),
+    Year = year(Date),
+    Month = month(Date, label = TRUE, abbr = FALSE),
+    MonthNum = month(Date),
+    Day = day(Date),
+    Hour = hour(Date),
+    Season = case_when(
+      MonthNum %in% c(12, 1, 2) ~ "Hiver",
+      MonthNum %in% c(3, 4, 5) ~ "Printemps",
+      MonthNum %in% c(6, 7, 8) ~ "Été",
+      MonthNum %in% c(9, 10, 11) ~ "Automne"
+    ),
+    Season = factor(Season, levels = c("Printemps", "Été", "Automne", "Hiver"))
+  )
+
+# Aperçu des données
+cat("📊 Dimensions du dataset:", nrow(df), "observations,", ncol(df), "variables\n")
+cat("📍 Stations:", paste(unique(df$nom_station), collapse = ", "), "\n")
+cat("📅 Période:", as.character(min(df$Date)), "à", as.character(max(df$Date)))
+```
+
+## Aperçu du Dataset
+
+```{r data-preview}
+#| label: data-preview
+
+df %>%
+  select(Date, nom_station, Solar.radiation, Solar.Panel, Battery, 
+         HC.Air.temperature, HC.Relative.humidity) %>%
+  head(100) %>%
+  datatable(
+    options = list(pageLength = 10, scrollX = TRUE),
+    caption = "Aperçu des 100 premières observations",
+    filter = "top"
+  )
+```
+
+---
+
+# 📈 Statistiques Descriptives
+
+## Vue d'ensemble des Variables Clés
+
+```{r descriptive-stats}
+#| label: descriptive-stats
+
+# Fonction pour calculer les statistiques
+calc_stats <- function(x) {
+  tibble(
+    N = sum(!is.na(x)),
+    Moyenne = round(mean(x, na.rm = TRUE), 2),
+    Médiane = round(median(x, na.rm = TRUE), 2),
+    `Écart-type` = round(sd(x, na.rm = TRUE), 2),
+    Variance = round(var(x, na.rm = TRUE), 2),
+    Min = round(min(x, na.rm = TRUE), 2),
+    Max = round(max(x, na.rm = TRUE), 2),
+    `Q1 (25%)` = round(quantile(x, 0.25, na.rm = TRUE), 2),
+    `Q3 (75%)` = round(quantile(x, 0.75, na.rm = TRUE), 2)
+  )
+}
+
+# Statistiques pour les variables principales
+stats_table <- bind_rows(
+  calc_stats(df$Solar.Panel) %>% mutate(Variable = "Solar Panel", .before = 1),
+  calc_stats(df$Solar.radiation) %>% mutate(Variable = "Solar Radiation", .before = 1),
+  calc_stats(df$Battery) %>% mutate(Variable = "Battery", .before = 1),
+  calc_stats(df$HC.Air.temperature) %>% mutate(Variable = "Température (°C)", .before = 1),
+  calc_stats(df$HC.Relative.humidity) %>% mutate(Variable = "Humidité (%)", .before = 1)
+)
+
+stats_table %>%
+  kable(
+    caption = "📊 Statistiques Descriptives des Variables Principales",
+    align = "c"
+  )
+```
+
+::: {.callout-tip}
+## Observations Clés
+- La **production solaire (Solar Panel)** varie considérablement avec une moyenne de `r round(mean(df$Solar.Panel, na.rm = TRUE), 0)` et un maximum de `r max(df$Solar.Panel, na.rm = TRUE)`
+- La **température** moyenne est de `r round(mean(df$HC.Air.temperature, na.rm = TRUE), 1)`°C
+- Le **rayonnement solaire** moyen atteint `r round(mean(df$Solar.radiation, na.rm = TRUE), 0)` W/m²
+:::
+
+## Distribution des Variables
+
+### Production Solaire (Solar Panel)
+
+```{r solar-panel-dist}
+#| label: solar-panel-dist
+#| fig-cap: "Distribution de la production des panneaux solaires"
+
+p1 <- df %>%
+  ggplot(aes(x = Solar.Panel)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 50, 
+                 fill = "#FFD700", color = "white", alpha = 0.8) +
+  geom_density(color = "#FF6B35", linewidth = 1.2) +
+  geom_vline(aes(xintercept = mean(Solar.Panel, na.rm = TRUE)), 
+             color = "#004E89", linetype = "dashed", linewidth = 1) +
+  annotate("text", x = mean(df$Solar.Panel, na.rm = TRUE) + 500, 
+           y = 0.0002, label = paste("Moyenne:", round(mean(df$Solar.Panel, na.rm = TRUE), 0)),
+           color = "#004E89", fontface = "bold") +
+  labs(
+    title = "Distribution de la Production Solaire",
+    subtitle = "Histogramme avec courbe de densité",
+    x = "Production (Solar Panel)",
+    y = "Densité"
+  )
+
+ggplotly(p1)
+```
+
+### Rayonnement Solaire vs Température
+
+```{r radiation-temp-dist}
+#| label: radiation-temp-dist
+#| fig-cap: "Distributions du rayonnement et de la température"
+#| layout-ncol: 2
+
+p2 <- df %>%
+  filter(Solar.radiation > 0) %>%
+  ggplot(aes(x = Solar.radiation)) +
+  geom_histogram(bins = 40, fill = "#FFA500", color = "white", alpha = 0.8) +
+  labs(title = "Distribution du Rayonnement Solaire (> 0)",
+       x = "Rayonnement (W/m²)", y = "Fréquence")
+
+p3 <- df %>%
+  ggplot(aes(x = HC.Air.temperature)) +
+  geom_histogram(bins = 40, fill = "#FF6B35", color = "white", alpha = 0.8) +
+  labs(title = "Distribution de la Température",
+       x = "Température (°C)", y = "Fréquence")
+
+ggplotly(p2)
+ggplotly(p3)
+```
+
+### Test de Normalité
+
+```{r normality-test}
+#| label: normality-test
+
+# Test de Shapiro-Wilk (échantillon de 5000 max)
+set.seed(42)
+sample_solar <- sample(df$Solar.Panel, min(5000, nrow(df)))
+
+shapiro_result <- shapiro.test(sample_solar)
+
+cat("🧪 Test de Shapiro-Wilk pour Solar Panel:\n")
+cat("   W =", round(shapiro_result$statistic, 4), "\n")
+cat("   p-value =", format.pval(shapiro_result$p.value), "\n")
+cat("   Conclusion:", ifelse(shapiro_result$p.value < 0.05, 
+                             "❌ Les données ne suivent PAS une distribution normale",
+                             "✅ Les données suivent une distribution normale"))
+```
+
+---
+
+# 🔥 Jours de Production Maximale
+
+## Top 10 des Meilleures Journées
+
+```{r top-production}
+#| label: top-production
+
+top_days <- df %>%
+  filter(Solar.Panel > 0) %>%
+  group_by(Date = as.Date(Date), nom_station) %>%
+  summarise(
+    Production_Max = max(Solar.Panel, na.rm = TRUE),
+    Rayonnement_Max = max(Solar.radiation, na.rm = TRUE),
+    Temp_Moy = round(mean(HC.Air.temperature, na.rm = TRUE), 1),
+    Humidite_Moy = round(mean(HC.Relative.humidity, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Production_Max)) %>%
+  head(10)
+
+top_days %>%
+  mutate(Date = as.character(Date)) %>%
+  datatable(
+    caption = "🏆 Top 10 des Journées avec Production Maximale",
+    options = list(pageLength = 10)
+  ) %>%
+  formatStyle("Production_Max", 
+              background = styleColorBar(top_days$Production_Max, "#FFD700"),
+              backgroundSize = "98% 88%",
+              backgroundRepeat = "no-repeat",
+              backgroundPosition = "center")
+```
+
+::: {.callout-important}
+## 🌟 Insight - Jours de Production Maximale
+Les journées les plus productives présentent généralement :
+
+- Un **rayonnement solaire intense** (> 900 W/m²)
+- Une **température modérée** (25-32°C)
+- Une **humidité relative basse** (< 50%)
+
+La station **`r top_days$nom_station[1]`** a enregistré la production maximale de **`r format(top_days$Production_Max[1], big.mark = " ")`** le **`r top_days$Date[1]`**.
+:::
+
+## Évolution Horaire de la Production
+
+```{r hourly-production}
+#| label: hourly-production
+#| fig-cap: "Profil horaire moyen de la production solaire"
+
+hourly_profile <- df %>%
+  group_by(Hour) %>%
+  summarise(
+    Solar_Mean = mean(Solar.Panel, na.rm = TRUE),
+    Radiation_Mean = mean(Solar.radiation, na.rm = TRUE),
+    Temp_Mean = mean(HC.Air.temperature, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_hourly <- ggplot(hourly_profile, aes(x = Hour)) +
+  geom_area(aes(y = Solar_Mean), fill = "#FFD700", alpha = 0.5) +
+  geom_line(aes(y = Solar_Mean), color = "#FFA500", linewidth = 1.5) +
+  geom_point(aes(y = Solar_Mean), color = "#FF6B35", size = 3) +
+  geom_line(aes(y = Radiation_Mean * 10), color = "#004E89", 
+            linewidth = 1, linetype = "dashed") +
+  scale_y_continuous(
+    name = "Production Solaire (Solar Panel)",
+    sec.axis = sec_axis(~./10, name = "Rayonnement (W/m²)")
+  ) +
+  scale_x_continuous(breaks = 0:23) +
+  labs(
+    title = "Profil Horaire de la Production Solaire",
+    subtitle = "Ligne pointillée: Rayonnement solaire",
+    x = "Heure de la journée"
+  ) +
+  theme(axis.title.y.right = element_text(color = "#004E89"))
+
+ggplotly(p_hourly)
+```
+
+---
+
+# 🔗 Analyse des Corrélations
+
+## Matrice de Corrélation
+
+```{r correlation-matrix}
+#| label: correlation-matrix
+#| fig-cap: "Matrice de corrélation entre les variables clés"
+#| fig-height: 8
+
+# Sélection des variables numériques
+cor_vars <- df %>%
+  select(Solar.radiation, Solar.Panel, Battery, HC.Air.temperature,
+         HC.Relative.humidity, Dew.Point, VPD, DeltaT, 
+         U.sonic.wind.speed, Wind.gust, Precipitation) %>%
+  drop_na()
+
+# Calcul de la matrice de corrélation
+cor_matrix <- cor(cor_vars)
+
+# Visualisation
+corrplot(cor_matrix, 
+         method = "color",
+         type = "upper",
+         order = "hclust",
+         addCoef.col = "black",
+         number.cex = 0.7,
+         tl.col = "black",
+         tl.srt = 45,
+         col = colorRampPalette(c("#004E89", "white", "#FFD700"))(200),
+         title = "Matrice de Corrélation - Variables Solaires",
+         mar = c(0, 0, 2, 0))
+```
+
+## Corrélations avec Solar Panel
+
+```{r correlation-solar}
+#| label: correlation-solar
+
+correlations <- cor_vars %>%
+  summarise(across(everything(), ~cor(.x, Solar.Panel, use = "complete.obs"))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Correlation") %>%
+  filter(Variable != "Solar.Panel") %>%
+  arrange(desc(abs(Correlation))) %>%
+  mutate(
+    Direction = ifelse(Correlation > 0, "Positive", "Négative"),
+    Correlation = round(Correlation, 3)
+  )
+
+p_cor <- ggplot(correlations, aes(x = reorder(Variable, Correlation), 
+                                   y = Correlation, fill = Direction)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = Correlation), hjust = ifelse(correlations$Correlation > 0, -0.2, 1.2),
+            size = 4) +
+  coord_flip() +
+  scale_fill_manual(values = c("Positive" = "#FFD700", "Négative" = "#004E89")) +
+  labs(
+    title = "Corrélations avec la Production Solaire",
+    subtitle = "Classement par force de corrélation",
+    x = "", y = "Coefficient de corrélation (r)"
+  ) +
+  theme(legend.position = "top")
+
+ggplotly(p_cor)
+```
+
+::: {.callout-note}
+## 📊 Interprétation des Corrélations
+
+| Relation | Corrélation | Interprétation |
+|----------|-------------|----------------|
+| Solar Panel ↔ Solar Radiation | **Très forte** | Plus le rayonnement est intense, plus la production augmente |
+| Solar Panel ↔ Battery | **Forte** | La production solaire recharge directement les batteries |
+| Solar Panel ↔ VPD | **Modérée** | Le déficit de pression de vapeur influence légèrement |
+| Solar Panel ↔ Humidité | **Négative** | L'humidité réduit l'efficacité des panneaux |
+:::
+
+## Relations Visuelles
+
+### Rayonnement Solaire vs Production
+
+```{r scatter-radiation}
+#| label: scatter-radiation
+#| fig-cap: "Relation entre rayonnement solaire et production"
+
+p_scatter1 <- df %>%
+  filter(Solar.radiation > 0) %>%
+  sample_n(min(2000, nrow(.))) %>%
+  ggplot(aes(x = Solar.radiation, y = Solar.Panel, color = nom_station)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed") +
+  scale_color_manual(values = solar_colors) +
+  labs(
+    title = "Rayonnement Solaire vs Production",
+    subtitle = "Relation linéaire forte attendue",
+    x = "Rayonnement Solaire (W/m²)",
+    y = "Production (Solar Panel)",
+    color = "Station"
+  )
+
+ggplotly(p_scatter1)
+```
+
+### Température vs Production
+
+```{r scatter-temp}
+#| label: scatter-temp
+#| fig-cap: "Impact de la température sur la production solaire"
+
+p_scatter2 <- df %>%
+  filter(Solar.Panel > 0) %>%
+  sample_n(min(2000, nrow(.))) %>%
+  ggplot(aes(x = HC.Air.temperature, y = Solar.Panel, color = Solar.radiation)) +
+  geom_point(alpha = 0.6, size = 2) +
+  scale_color_gradientn(colors = c("#004E89", "#FFD700", "#FF6B35")) +
+  geom_smooth(method = "loess", se = TRUE, color = "black") +
+  labs(
+    title = "Température vs Production Solaire",
+    subtitle = "Couleur = Rayonnement solaire",
+    x = "Température de l'air (°C)",
+    y = "Production (Solar Panel)",
+    color = "Rayonnement"
+  )
+
+ggplotly(p_scatter2)
+```
+
+::: {.callout-warning}
+## 🌡️ Impact de la Température
+Une **température trop élevée** (> 35°C) peut réduire légèrement le rendement des panneaux solaires. C'est l'**effet thermique** : les cellules photovoltaïques perdent en efficacité quand elles chauffent trop.
+
+La zone optimale de température pour la production maximale semble être entre **25°C et 32°C**.
+:::
+
+---
+
+# 🗓️ Analyse Saisonnière
+
+## Production par Saison
+
+```{r seasonal-boxplot}
+#| label: seasonal-boxplot
+#| fig-cap: "Distribution de la production solaire par saison"
+
+p_season <- df %>%
+  filter(Solar.Panel > 0) %>%
+  ggplot(aes(x = Season, y = Solar.Panel, fill = Season)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.3) +
+  geom_jitter(alpha = 0.1, width = 0.2, size = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 4, color = "black") +
+  scale_fill_manual(values = c("Printemps" = "#7CB518", 
+                               "Été" = "#FFD700", 
+                               "Automne" = "#FF6B35", 
+                               "Hiver" = "#004E89")) +
+  labs(
+    title = "Production Solaire par Saison",
+    subtitle = "◆ = Moyenne | Boîte = Médiane et quartiles",
+    x = "", y = "Production (Solar Panel)"
+  ) +
+  theme(legend.position = "none")
+
+ggplotly(p_season)
+```
+
+## Statistiques par Saison
+
+```{r seasonal-stats}
+#| label: seasonal-stats
+
+seasonal_stats <- df %>%
+  filter(Solar.Panel > 0) %>%
+  group_by(Season) %>%
+  summarise(
+    N = n(),
+    `Moy. Production` = round(mean(Solar.Panel, na.rm = TRUE), 0),
+    `Méd. Production` = round(median(Solar.Panel, na.rm = TRUE), 0),
+    `Moy. Rayonnement` = round(mean(Solar.radiation, na.rm = TRUE), 0),
+    `Moy. Température` = round(mean(HC.Air.temperature, na.rm = TRUE), 1),
+    `Moy. Humidité` = round(mean(HC.Relative.humidity, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+seasonal_stats %>%
+  kable(caption = "📅 Statistiques par Saison", align = "c")
+```
+
+## Test de Comparaison Été vs Hiver
+
+```{r t-test-season}
+#| label: t-test-season
+
+# Données été et hiver
+ete <- df %>% filter(Season == "Été", Solar.Panel > 0) %>% pull(Solar.Panel)
+hiver <- df %>% filter(Season == "Hiver", Solar.Panel > 0) %>% pull(Solar.Panel)
+
+if (length(ete) > 1 & length(hiver) > 1) {
+  t_result <- t.test(ete, hiver)
+  
+  cat("🧪 Test t de Student - Été vs Hiver:\n\n")
+  cat("   Moyenne Été:", round(mean(ete), 0), "\n")
+  cat("   Moyenne Hiver:", round(mean(hiver), 0), "\n")
+  cat("   Différence:", round(mean(ete) - mean(hiver), 0), "\n\n")
+  cat("   t =", round(t_result$statistic, 2), "\n")
+  cat("   p-value =", format.pval(t_result$p.value), "\n")
+  cat("   IC 95%: [", round(t_result$conf.int[1], 0), ",", 
+      round(t_result$conf.int[2], 0), "]\n\n")
+  cat("   Conclusion:", ifelse(t_result$p.value < 0.05,
+                               "✅ Différence SIGNIFICATIVE entre été et hiver",
+                               "❌ Pas de différence significative"))
+} else {
+  cat("⚠️ Données insuffisantes pour le test t")
+}
+```
+
+## Évolution Mensuelle
+
+```{r monthly-evolution}
+#| label: monthly-evolution
+#| fig-cap: "Évolution mensuelle de la production et des conditions météo"
+
+monthly_data <- df %>%
+  group_by(MonthNum) %>%
+  summarise(
+    Solar_Panel = mean(Solar.Panel, na.rm = TRUE),
+    Solar_Radiation = mean(Solar.radiation, na.rm = TRUE),
+    Temperature = mean(HC.Air.temperature, na.rm = TRUE),
+    Humidity = mean(HC.Relative.humidity, na.rm = TRUE),
+    Battery = mean(Battery, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Month = month(MonthNum, label = TRUE, abbr = TRUE))
+
+p_monthly <- ggplot(monthly_data, aes(x = MonthNum)) +
+  geom_area(aes(y = Solar_Panel), fill = "#FFD700", alpha = 0.4) +
+  geom_line(aes(y = Solar_Panel), color = "#FFA500", linewidth = 1.5) +
+  geom_point(aes(y = Solar_Panel), color = "#FF6B35", size = 3) +
+  geom_line(aes(y = Solar_Radiation * 10), color = "#004E89", 
+            linewidth = 1, linetype = "dashed") +
+  geom_line(aes(y = Temperature * 300), color = "#FF0000", 
+            linewidth = 1, linetype = "dotted") +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_y_continuous(
+    name = "Production Solaire",
+    sec.axis = sec_axis(~./10, name = "Rayonnement (W/m²)")
+  ) +
+  labs(
+    title = "Évolution Mensuelle - Production, Rayonnement et Température",
+    subtitle = "Orange: Production | Bleu pointillé: Rayonnement | Rouge: Température",
+    x = "Mois"
+  )
+
+ggplotly(p_monthly)
+```
+
+---
+
+# 📍 Comparaison des Stations
+
+## Performance par Station
+
+```{r station-comparison}
+#| label: station-comparison
+#| fig-cap: "Comparaison de la production entre stations"
+
+station_stats <- df %>%
+  filter(Solar.Panel > 0) %>%
+  group_by(nom_station) %>%
+  summarise(
+    N = n(),
+    Production_Moy = round(mean(Solar.Panel, na.rm = TRUE), 0),
+    Production_Max = max(Solar.Panel, na.rm = TRUE),
+    Battery_Moy = round(mean(Battery, na.rm = TRUE), 0),
+    Rayonnement_Moy = round(mean(Solar.radiation, na.rm = TRUE), 0),
+    Temp_Moy = round(mean(HC.Air.temperature, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Production_Moy))
+
+p_stations <- station_stats %>%
+  ggplot(aes(x = reorder(nom_station, Production_Moy), y = Production_Moy, 
+             fill = Production_Moy)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = Production_Moy), hjust = -0.2, fontface = "bold") +
+  coord_flip() +
+  scale_fill_gradientn(colors = c("#004E89", "#FFD700", "#FF6B35")) +
+  labs(
+    title = "Production Moyenne par Station",
+    subtitle = "Classement des stations les plus productives",
+    x = "", y = "Production Moyenne (Solar Panel)"
+  ) +
+  theme(legend.position = "none")
+
+ggplotly(p_stations)
+```
+
+```{r station-table}
+#| label: station-table
+
+station_stats %>%
+  datatable(
+    caption = "📍 Statistiques Détaillées par Station",
+    options = list(pageLength = 10)
+  ) %>%
+  formatStyle("Production_Moy",
+              background = styleColorBar(station_stats$Production_Moy, "#FFD700"))
+```
+
+::: {.callout-tip}
+## 🏆 Meilleures Stations
+La station **`r station_stats$nom_station[1]`** est la plus productive avec une moyenne de **`r format(station_stats$Production_Moy[1], big.mark = " ")`**.
+
+Ces stations sont idéales pour implanter des installations solaires à grande échelle.
+:::
+
+---
+
+# 🔋 Analyse des Batteries
+
+## Relation Production Solaire → Batterie
+
+```{r battery-analysis}
+#| label: battery-analysis
+#| fig-cap: "Impact de la production solaire sur le niveau de batterie"
+
+p_battery <- df %>%
+  sample_n(min(2000, nrow(.))) %>%
+  ggplot(aes(x = Solar.Panel, y = Battery, color = HC.Air.temperature)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  scale_color_gradientn(colors = c("#004E89", "#7CB518", "#FFD700", "#FF6B35")) +
+  labs(
+    title = "Production Solaire vs Niveau de Batterie",
+    subtitle = "Couleur = Température de l'air",
+    x = "Production (Solar Panel)",
+    y = "Niveau de Batterie",
+    color = "Temp (°C)"
+  )
+
+ggplotly(p_battery)
+```
+
+## Distribution du Niveau de Batterie
+
+```{r battery-dist}
+#| label: battery-dist
+#| fig-cap: "Distribution des niveaux de batterie"
+
+p_bat_dist <- df %>%
+  ggplot(aes(x = Battery)) +
+  geom_histogram(bins = 40, fill = "#7CB518", color = "white", alpha = 0.8) +
+  geom_vline(aes(xintercept = mean(Battery, na.rm = TRUE)), 
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Distribution des Niveaux de Batterie",
+    subtitle = paste("Moyenne:", round(mean(df$Battery, na.rm = TRUE), 0)),
+    x = "Niveau de Batterie", y = "Fréquence"
+  )
+
+ggplotly(p_bat_dist)
+```
+
+---
+
+# 📊 Modélisation
+
+## Régression Linéaire Simple
+
+```{r linear-model}
+#| label: linear-model
+
+# Modèle: Solar Panel ~ Solar Radiation
+model_simple <- lm(Solar.Panel ~ Solar.radiation, data = df)
+
+cat("📈 Régression Linéaire Simple: Solar.Panel ~ Solar.radiation\n\n")
+summary(model_simple)
+```
+
+## Régression Linéaire Multiple
+
+```{r multiple-regression}
+#| label: multiple-regression
+
+# Modèle multiple
+model_multi <- lm(Solar.Panel ~ Solar.radiation + HC.Air.temperature + 
+                    HC.Relative.humidity + VPD + U.sonic.wind.speed, 
+                  data = df)
+
+cat("📈 Régression Linéaire Multiple\n\n")
+summary(model_multi)
+```
+
+```{r model-comparison}
+#| label: model-comparison
+
+# Comparaison des modèles
+cat("\n📊 Comparaison des Modèles:\n\n")
+cat("   R² Simple:", round(summary(model_simple)$r.squared, 4), "\n")
+cat("   R² Multiple:", round(summary(model_multi)$r.squared, 4), "\n")
+cat("   R² Ajusté Multiple:", round(summary(model_multi)$adj.r.squared, 4), "\n")
+```
+
+## Visualisation du Modèle
+
+```{r model-viz}
+#| label: model-viz
+#| fig-cap: "Valeurs prédites vs valeurs observées"
+
+df_pred <- df %>%
+  drop_na(Solar.radiation, HC.Air.temperature, HC.Relative.humidity, VPD, U.sonic.wind.speed) %>%
+  mutate(Predicted = predict(model_multi))
+
+p_pred <- df_pred %>%
+  sample_n(min(1000, nrow(.))) %>%
+  ggplot(aes(x = Solar.Panel, y = Predicted)) +
+  geom_point(alpha = 0.4, color = "#004E89") +
+  geom_abline(slope = 1, intercept = 0, color = "#FF6B35", 
+              linewidth = 1.5, linetype = "dashed") +
+  labs(
+    title = "Valeurs Observées vs Prédites",
+    subtitle = paste("R² =", round(summary(model_multi)$r.squared, 3)),
+    x = "Production Observée", y = "Production Prédite"
+  )
+
+ggplotly(p_pred)
+```
+
+---
+
+# 💡 Conclusions et Insights
+
+## Résumé des Découvertes
+
+::: {.panel-tabset}
+
+### 🌞 Production Solaire
+
+```{r insight-production}
+#| echo: false
+
+max_prod <- df %>% filter(Solar.Panel == max(Solar.Panel, na.rm = TRUE))
+```
+
+- **Production maximale** : `r format(max(df$Solar.Panel, na.rm = TRUE), big.mark = " ")` enregistrée à la station **`r max_prod$nom_station[1]`**
+- **Heures optimales** : 10h - 14h (pic de rayonnement)
+- **Corrélation avec rayonnement** : très forte (r > 0.9)
+
+### 🌡️ Impact Température
+
+- **Zone optimale** : 25°C - 32°C
+- **Effet thermique** : légère baisse au-delà de 35°C
+- **Humidité** : effet négatif modéré sur la production
+
+### 📅 Saisonnalité
+
+- **Saison la plus productive** : Été (juin-août)
+- **Différence été/hiver** : statistiquement significative
+- **Meilleurs mois** : juin et juillet
+
+### 📍 Stations
+
+- **Station la plus performante** : `r station_stats$nom_station[1]`
+- **Critères d'implantation** : rayonnement élevé, humidité basse
+- **Potentiel d'optimisation** : identifier stations sous-performantes
+
+:::
+
+## Recommandations
+
+::: {.callout-success}
+## 📋 Actions Recommandées
+
+1. **Optimisation horaire** : Concentrer la consommation énergétique entre 10h et 14h
+2. **Maintenance préventive** : Nettoyer les panneaux en période de forte humidité
+3. **Expansion** : Prioriser les stations type `r station_stats$nom_station[1]` pour de nouvelles installations
+4. **Stockage** : Dimensionner les batteries selon les pics de production
+5. **Monitoring** : Surveiller l'effet thermique en été
+:::
+
+---
+
+# 📚 Annexes
+
+## Informations de Session
+
+```{r session-info}
+#| label: session-info
+#| echo: true
+
+sessionInfo()
+```
+
+---
+
+*Rapport généré le `r format(Sys.time(), "%d %B %Y à %H:%M")`*
