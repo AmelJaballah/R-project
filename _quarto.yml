@@ -1,0 +1,19 @@
+project:
+  output-dir: docs
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Voir le code"
+    fig-width: 10
+    fig-height: 6
+    embed-resources: true
+
+execute:
+  warning: false
+  message: false
